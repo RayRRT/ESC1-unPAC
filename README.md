@@ -44,10 +44,7 @@ https://github.com/user-attachments/assets/806cfbed-2d64-4256-bc2b-0f93bc6c8e08
 
 ### Build (on Kali)
 ```bash
-git clone https://github.com/RayRRT/ESC1-unPAC.git
-cd ESC1-unPAC/ESC1-unPAC
-chmod + x build.sh
-./build.sh
+git clone https://github.com/RayRRT/ESC1-unPAC.git && cd ESC1-unPAC && chmod +x build.sh && ./build.sh
 ```
 
 ### Load in Havoc
